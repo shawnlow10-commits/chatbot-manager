@@ -38,6 +38,178 @@ class ChatraceClient:
             "Content-Type": "application/json",
         }
 
+            "Content-Type": "application/json",
+        }
+
+    async def bulk_sync_contacts(self, store, analyzer, client_id: str) -> int:
+        """Pull contacts from Chatrace and re-analyze their chat histories.
+
+        Called on startup to repopulate the local DB after a restart.
+        Uses find_by_custom_field to get contacts with chat history,
+        then re-runs NIM analysis and stores results locally.
+
+        Args:
+            store: MemoryStore instance to persist results.
+            analyzer: NIMAnalyzer instance for analysis.
+            client_id: The client identifier.
+
+        Returns:
+            Number of contacts successfully synced.
+        """
+        if not self._token:
+            return 0
+
+        logger.info("Starting bulk sync from Chatrace", extra={"client_id": client_id})
+        synced = 0
+
+        try:
+            # Try to find contacts using the custom field search
+            # Chatrace API: GET /contacts/find_by_custom_field?custom_field_id=XXX&value=XXX
+            # We'll try fetching contacts that have the "chat history" field
+            chat_history_field_id = await self._get_custom_field_id_by_name("chat history")
+            if not chat_history_field_id:
+                logger.warning("Could not find 'chat history' custom field ID")
+                return 0
+
+            # Query contacts with that field populated
+            url = f"{CHATRACE_BASE_URL}/contacts/find_by_custom_field"
+            params = {"custom_field_id": chat_history_field_id}
+            response = await self._http.get(url, headers=self._headers, params=params, timeout=30)
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Chatrace find_by_custom_field returned non-200",
+                    extra={"status_code": response.status_code},
+                )
+                return 0
+
+            data = response.json()
+            contacts = data if isinstance(data, list) else data.get("data", data.get("contacts", []))
+
+            if not contacts:
+                logger.info("No contacts found with chat history in Chatrace")
+                return 0
+
+            logger.info(f"Found {len(contacts)} contacts to sync")
+
+            # Process each contact (limit to most recent 50 to avoid hammering NIM)
+            for contact in contacts[:50]:
+                try:
+                    contact_id = contact.get("phone") or contact.get("id") or ""
+                    if not contact_id:
+                        continue
+
+                    # Check if we already have this contact analyzed
+                    # Use a simple dedupe: check if contact_id exists in structured_outputs
+                    assert store._db is not None
+                    cursor = await store._db.execute(
+                        "SELECT 1 FROM structured_outputs WHERE contact_id = ? LIMIT 1",
+                        (str(contact_id),),
+                    )
+                    if await cursor.fetchone():
+                        continue  # Already synced
+
+                    # Get chat history from custom fields
+                    chat_history_text = ""
+                    custom_fields = contact.get("custom_fields", [])
+                    if isinstance(custom_fields, list):
+                        for field in custom_fields:
+                            if isinstance(field, dict):
+                                if field.get("name", "").lower().strip() == "chat history":
+                                    chat_history_text = field.get("value", "")
+                                    break
+
+                    # If no chat history in the bulk response, try fetching individually
+                    if not chat_history_text:
+                        individual = await self._get_contact_with_fields(str(contact_id))
+                        if individual:
+                            custom_fields = individual.get("custom_fields", [])
+                            for field in custom_fields:
+                                if isinstance(field, dict):
+                                    if field.get("name", "").lower().strip() == "chat history":
+                                        chat_history_text = field.get("value", "")
+                                        break
+
+                    if not chat_history_text:
+                        continue
+
+                    # Parse chat history
+                    from chatbot_monitor.validator import _parse_chatrace_chat_history
+                    messages = _parse_chatrace_chat_history(chat_history_text)
+                    if not messages:
+                        continue
+
+                    # Get timestamp
+                    last_interaction = contact.get("last_interaction", "")
+                    if last_interaction:
+                        try:
+                            from datetime import datetime, timezone
+                            ts_seconds = int(last_interaction) / 1000.0
+                            dt = datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
+                            timestamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        except (ValueError, TypeError):
+                            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    else:
+                        from datetime import datetime, timezone
+                        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                    # Compute dedupe key
+                    from chatbot_monitor.deduplicator import compute_dedupe_key
+                    dedupe_key = compute_dedupe_key(client_id, str(contact_id), timestamp)
+
+                    # Check dedupe
+                    if await store.has_dedupe_key(dedupe_key):
+                        continue
+
+                    # Analyze with NIM
+                    result = await analyzer.analyze(
+                        chat_history=messages,
+                        client_id=client_id,
+                        dedupe_key=dedupe_key,
+                    )
+
+                    if result is None:
+                        continue
+
+                    # Store
+                    await store.store_dedupe_key(dedupe_key, client_id)
+                    await store.store_structured_output(
+                        client_id=client_id,
+                        contact_id=str(contact_id),
+                        dedupe_key=dedupe_key,
+                        timestamp=timestamp,
+                        output=result,
+                    )
+                    synced += 1
+                    logger.info(
+                        "Synced contact",
+                        extra={"contact_id": contact_id, "outcome": result.outcome.value},
+                    )
+
+                except Exception as e:
+                    logger.warning(
+                        "Failed to sync individual contact",
+                        extra={"error": str(e)},
+                    )
+                    continue
+
+        except Exception as e:
+            logger.error("Bulk sync failed", extra={"error": str(e)})
+
+        logger.info(f"Bulk sync complete: {synced} contacts synced")
+        return synced
+
+    async def _get_contact_with_fields(self, contact_id: str) -> dict | None:
+        """Fetch a single contact with all their custom fields."""
+        try:
+            url = f"{CHATRACE_BASE_URL}/contacts/{contact_id}"
+            response = await self._http.get(url, headers=self._headers, timeout=15)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.debug("Failed to fetch contact", extra={"contact_id": contact_id, "error": str(e)})
+        return None
+
     async def sync_analysis_to_contact(
         self,
         contact_id: str,

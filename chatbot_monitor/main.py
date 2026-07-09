@@ -91,6 +91,15 @@ async def lifespan(app: FastAPI):
         chatrace_client = ChatraceClient(chatrace_token, http_client)
         logger.info("Chatrace API client initialized")
 
+        # Run bulk sync on startup to repopulate DB after restart
+        try:
+            for cid in config.clients:
+                synced = await chatrace_client.bulk_sync_contacts(store, analyzer, cid)
+                if synced > 0:
+                    logger.info(f"Startup sync: {synced} contacts for {cid}")
+        except Exception as e:
+            logger.warning(f"Startup sync failed (non-blocking): {e}")
+
     # Inject into app state for dependency injection
     app.state.config = config
     app.state.store = store

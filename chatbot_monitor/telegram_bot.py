@@ -75,6 +75,8 @@ async def telegram_webhook(request: Request) -> Response:
             reply = await _handle_status(store, config)
         elif text.startswith("/tag"):
             reply = await _handle_tag(text, request)
+        elif text.startswith("/sync"):
+            reply = await _handle_sync(request)
         elif text.startswith("/help"):
             reply = _handle_help()
         else:
@@ -98,6 +100,7 @@ def _handle_help() -> str:
         "/dropoffs — Who dropped off today\n"
         "/status — System status\n"
         "/tag <phone> <tag> — Tag a contact\n"
+        "/sync — Re-sync contacts from Chatrace\n"
         "/help — This message\n\n"
         "Or just type a question and I'll try to answer it."
     )
@@ -382,3 +385,27 @@ async def _handle_freeform(text: str, request: Request) -> str:
     except Exception as e:
         logger.error("Freeform NIM call failed", extra={"error": str(e)})
         return f"❌ Couldn't process your question: {str(e)[:200]}"
+
+
+async def _handle_sync(request: Request) -> str:
+    """Handle /sync — manually trigger a bulk re-sync from Chatrace."""
+    chatrace_client = getattr(request.app.state, "chatrace_client", None)
+    if not chatrace_client:
+        return "❌ Chatrace API not configured. Add CHATRACE_API_TOKEN to environment."
+
+    store = request.app.state.store
+    analyzer = request.app.state.analyzer
+    config = request.app.state.config
+
+    total_synced = 0
+    for cid in config.clients:
+        try:
+            synced = await chatrace_client.bulk_sync_contacts(store, analyzer, cid)
+            total_synced += synced
+        except Exception as e:
+            logger.error(f"Sync failed for {cid}: {e}")
+
+    if total_synced > 0:
+        return f"✅ Synced {total_synced} contacts from Chatrace"
+    else:
+        return "ℹ️ No new contacts to sync (all already in DB or no chat history found)"
