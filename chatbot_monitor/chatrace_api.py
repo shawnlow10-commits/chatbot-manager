@@ -34,10 +34,10 @@ class ChatraceClient:
         self._token = api_token
         self._http = http_client
         self._headers = {
+            "X-ACCESS-TOKEN": api_token,
             "Content-Type": "application/json",
         }
-        # Chatrace uses api_token as a query parameter for auth
-        self._auth_params = {"api_token": api_token}
+        self._auth_params = {}
 
     async def bulk_sync_contacts(self, store, analyzer, client_id: str) -> int:
         """Pull contacts from Chatrace and re-analyze their chat histories.
