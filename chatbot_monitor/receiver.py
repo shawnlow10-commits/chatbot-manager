@@ -316,7 +316,57 @@ async def _process_conversation(
             )
             return
 
-        # Step 2: Persist structured output
+        # Step 2: Check for immediate flags (spam, salesperson, notable contact)
+        notifier = request.app.state.notifier
+        should_flag = False
+        flag_reason = ""
+
+        if result.outcome.value == "spam":
+            should_flag = True
+            flag_reason = "Salesperson/vendor detected"
+        elif result.notable_quote and any(
+            word in (result.notable_quote or "").lower()
+            for word in ["sell", "offer", "partnership", "promote", "pitch", "service", "emergency", "can't move", "accident"]
+        ):
+            should_flag = True
+            flag_reason = "Contact needs human attention"
+        elif result.sentiment.value == "negative" and result.bot_error_detected:
+            should_flag = True
+            flag_reason = "Frustrated user + bot error"
+
+        if should_flag:
+            client_config = request.app.state.config.clients.get(client_id)
+            display_name = client_config.display_name if client_config else client_id
+            flag_message = (
+                f"⚠️ Flagged Contact\n\n"
+                f"Client: {display_name}\n"
+                f"Contact: {contact_id}\n"
+                f"Reason: {flag_reason}\n"
+                f"Outcome: {result.outcome.value}\n"
+                f"Sentiment: {result.sentiment.value}\n"
+            )
+            if result.notable_quote:
+                flag_message += f"Quote: \"{result.notable_quote}\"\n"
+            if result.summary:
+                flag_message += f"Summary: {result.summary}"
+
+            try:
+                await notifier._send_message_with_retry(flag_message)
+                logger.info(
+                    "Flagged contact notification sent",
+                    extra={
+                        "client_id": client_id,
+                        "contact_id": contact_id,
+                        "flag_reason": flag_reason,
+                    },
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to send flag notification",
+                    extra={"client_id": client_id, "error": str(e)},
+                )
+
+        # Step 3: Persist structured output
         try:
             await store.store_structured_output(
                 client_id=client_id,
@@ -338,7 +388,7 @@ async def _process_conversation(
             )
             return
 
-        # Step 3: Evaluate anomalies
+        # Step 4: Evaluate anomalies
         try:
             alerts = await detector.evaluate(client_id, result)
         except Exception as e:
@@ -354,7 +404,7 @@ async def _process_conversation(
             )
             return
 
-        # Step 4: Send alerts for triggered anomalies
+        # Step 5: Send alerts for triggered anomalies
         if alerts:
             notifier = request.app.state.notifier
             for alert in alerts:

@@ -1,4 +1,4 @@
-You are a conversation analyst. Your previous response was not valid JSON. Please try again.
+You are a conversation analyst. Your previous response was not valid JSON or exceeded field length limits. Try again.
 
 You MUST respond with ONLY a valid JSON object. No markdown, no explanation, no extra text.
 
@@ -8,15 +8,19 @@ The JSON object MUST have exactly these fields with these exact types:
   "drop_off_stage": "greeting" | "qualification" | "objection_handling" | "closing" | null,
   "sentiment": "positive" | "neutral" | "frustrated" | "negative",
   "bot_error_detected": true | false,
-  "bot_error_notes": "string (max 500 chars)" | null,
-  "notable_quote": "string (max 300 chars)" | null,
-  "summary": "string (max 200 chars)"
+  "bot_error_notes": "string max 500 chars" | null,
+  "notable_quote": "string max 300 chars" | null,
+  "summary": "string MUST be under 200 chars"
 }}
 
-Rules:
+CRITICAL RULES:
+- "summary" MUST be under 200 characters. Keep it to ONE short sentence.
 - drop_off_stage must be null unless outcome is "dropped_off"
 - bot_error_notes must be null if bot_error_detected is false
-- All string fields must respect their max length
+- "spam" outcome = salesperson, vendor, recruiter, or someone not seeking physio/PT services
+- Flag notable_quote if user is a salesperson pitching, has an emergency, or is angry
+
+Context: This is a physiotherapy lead-gen bot at Good Juju Body Care. Expected flow: opening → issue → duration+pain → timing+name → handoff → optional physio preference.
 
 Conversation:
 {chat_history}
