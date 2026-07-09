@@ -214,6 +214,16 @@ class DigestScheduler:
         )
         logger.info("Data purge job registered (daily at 03:00 UTC)")
 
+        # 4. Register biweekly report (1st and 15th of each month at 09:00 UTC)
+        self._scheduler.add_job(
+            self.generate_biweekly_report,
+            trigger=CronTrigger(hour="9", minute="0", day="1,15"),
+            id="biweekly_report",
+            name="Biweekly Performance Report",
+            replace_existing=True,
+        )
+        logger.info("Biweekly report job registered (1st + 15th at 09:00 UTC)")
+
         # Start the scheduler
         self._scheduler.start()
         logger.info("Digest scheduler started")
@@ -334,6 +344,99 @@ class DigestScheduler:
                 "Digest delivery failed, synthesis cached for retry",
                 extra={"client_count": len(sections)},
             )
+
+    async def generate_biweekly_report(self) -> None:
+        """Generate a biweekly performance report covering the last 3-4 days.
+
+        Unlike the daily digest (short bullets), this report is a deeper analysis:
+        - Total lead volume and conversion rates
+        - Top drop-off stages with trends
+        - Bot error patterns
+        - Sentiment trends
+        - Actionable recommendations
+
+        Runs on the 1st and 15th of each month at 09:00 UTC.
+        """
+        logger.info("Biweekly report generation started")
+
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        # Look back 14 days (covers since last biweekly report)
+        period_start = now - timedelta(days=14)
+
+        report_sections: list[str] = []
+
+        for client_id, client_config in self._config.clients.items():
+            conversations = await self._store.get_conversations_since(
+                client_id, period_start
+            )
+
+            if not conversations:
+                continue
+
+            total = len(conversations)
+            qualified = sum(1 for c in conversations if c.outcome.value == "qualified_lead")
+            booked = sum(1 for c in conversations if c.outcome.value == "booked")
+            dropped = sum(1 for c in conversations if c.outcome.value == "dropped_off")
+            spam = sum(1 for c in conversations if c.outcome.value == "spam")
+            errors = sum(1 for c in conversations if c.bot_error_detected)
+            negative = sum(1 for c in conversations if c.sentiment.value in ("negative", "frustrated"))
+
+            # Build a detailed prompt for NIM
+            prompt = (
+                f"Generate a performance report for {client_config.display_name} chatbot.\n\n"
+                f"Period: last 2 weeks\n"
+                f"Total conversations: {total}\n"
+                f"Qualified leads: {qualified} ({qualified/total*100:.0f}%)\n"
+                f"Booked: {booked} ({booked/total*100:.0f}%)\n"
+                f"Dropped off: {dropped} ({dropped/total*100:.0f}%)\n"
+                f"Spam/salespeople: {spam}\n"
+                f"Bot errors: {errors} ({errors/total*100:.0f}%)\n"
+                f"Negative/frustrated sentiment: {negative} ({negative/total*100:.0f}%)\n\n"
+                f"Outcome distribution:\n{_format_outcome_distribution(conversations)}\n\n"
+                f"Drop-off stages:\n{_format_dropoff_stages(conversations)}\n\n"
+                f"Sentiment distribution:\n{_format_sentiment_distribution(conversations)}\n\n"
+                f"Provide:\n"
+                f"1. A brief performance summary (2-3 sentences)\n"
+                f"2. Key wins this period\n"
+                f"3. Problem areas needing attention\n"
+                f"4. Specific actionable recommendations (max 3)\n"
+                f"5. Comparison note (is this better or worse than typical?)\n\n"
+                f"Format as bullet points. Be specific and actionable."
+            )
+
+            synthesis = await self._call_nim_synthesis(prompt, client_id)
+            if synthesis:
+                report_sections.append(
+                    f"📋 {client_config.display_name}\n"
+                    f"({total} conversations, {period_start.strftime('%b %d')} – {now.strftime('%b %d')})\n\n"
+                    f"{synthesis}"
+                )
+
+        if not report_sections:
+            logger.info("No data for biweekly report, skipping")
+            return
+
+        # Send as Telegram message(s)
+        header = "📋 Biweekly Performance Report\n\n"
+        full_report = header + "\n\n---\n\n".join(report_sections)
+
+        # Split if needed (4096 char limit)
+        if len(full_report) <= 4096:
+            await self._notifier._send_message_with_retry(full_report)
+        else:
+            # Send header + each section separately
+            await self._notifier._send_message_with_retry(header.strip())
+            for section in report_sections:
+                if len(section) > 4096:
+                    section = section[:4093] + "..."
+                await self._notifier._send_message_with_retry(section)
+
+        logger.info(
+            "Biweekly report delivered",
+            extra={"client_count": len(report_sections)},
+        )
 
     async def _retry_cached_digests(self) -> bool:
         """Retry delivery of cached undelivered digests.
