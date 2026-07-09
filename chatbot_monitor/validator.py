@@ -2,10 +2,15 @@
 
 This module validates incoming webhook payloads against the required schema,
 truncates chat_history to the maximum allowed messages, and extracts optional fields.
+
+Supports both the canonical format (contact_id, timestamp, chat_history) and
+Chatrace's "All Contact Data" format, which sends contact fields at the top level
+with chat history stored in a custom_fields entry named "chat history".
 """
 
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 
 from chatbot_monitor.logging_config import get_logger
 from chatbot_monitor.models import ChatMessage, WebhookPayload
@@ -68,12 +73,133 @@ def _validate_timestamp(timestamp: str) -> bool:
         return False
 
 
+def _parse_chatrace_chat_history(text: str) -> list[dict]:
+    """Parse Chatrace's plain-text chat history into structured messages.
+
+    Chatrace stores chat history as a custom field with format:
+        User (2026-07-9 2:56pm): hi
+        I (2026-07-9 2:56pm): hey, welcome!
+
+    Args:
+        text: The raw chat history text from Chatrace.
+
+    Returns:
+        List of message dicts with 'role', 'content', and optionally 'timestamp'.
+    """
+    messages = []
+    # Pattern: "User (...): message" or "I (...): message"
+    # Split on lines that start with "User (" or "I ("
+    pattern = re.compile(
+        r'^(User|I)\s*\(([^)]+)\):\s*(.*?)(?=\n(?:User|I)\s*\(|$)',
+        re.MULTILINE | re.DOTALL
+    )
+
+    for match in pattern.finditer(text):
+        sender = match.group(1)
+        timestamp_str = match.group(2).strip()
+        content = match.group(3).strip()
+
+        if not content:
+            continue
+
+        role = "user" if sender == "User" else "bot"
+        messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": timestamp_str,
+        })
+
+    return messages
+
+
+def _transform_chatrace_payload(body: dict) -> dict:
+    """Transform Chatrace's 'All Contact Data' format into our canonical format.
+
+    Chatrace sends:
+    - id / phone: contact identifier
+    - last_interaction: unix timestamp in milliseconds
+    - custom_fields: array with a "chat history" entry containing the transcript
+    - tags: list of tag strings
+
+    We transform to:
+    - contact_id: from phone or id
+    - timestamp: ISO 8601 from last_interaction
+    - chat_history: parsed from custom_fields "chat history" value
+    - tags: passed through
+
+    Args:
+        body: The raw Chatrace payload.
+
+    Returns:
+        Transformed dict in canonical format, or the original body if it
+        doesn't look like a Chatrace payload.
+    """
+    # Detect if this is a Chatrace payload (has 'custom_fields' or 'page_id')
+    if "custom_fields" not in body and "page_id" not in body:
+        return body  # Not a Chatrace payload, return as-is
+
+    logger.info("Detected Chatrace payload format, transforming")
+
+    transformed = {}
+
+    # Extract contact_id from phone or id
+    transformed["contact_id"] = body.get("phone") or body.get("id") or ""
+
+    # Extract timestamp from last_interaction (unix ms) or created_at
+    last_interaction = body.get("last_interaction")
+    if last_interaction:
+        try:
+            ts_seconds = int(last_interaction) / 1000.0
+            dt = datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
+            transformed["timestamp"] = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, TypeError, OSError):
+            # Fallback to created_at if available
+            created_at = body.get("created_at")
+            if created_at:
+                transformed["timestamp"] = created_at.replace(" ", "T") + "Z"
+            else:
+                transformed["timestamp"] = ""
+    else:
+        created_at = body.get("created_at")
+        if created_at:
+            transformed["timestamp"] = created_at.replace(" ", "T") + "Z"
+        else:
+            transformed["timestamp"] = ""
+
+    # Extract chat_history from custom_fields
+    chat_history_text = ""
+    custom_fields = body.get("custom_fields", [])
+    if isinstance(custom_fields, list):
+        for field in custom_fields:
+            if isinstance(field, dict):
+                field_name = field.get("name", "").lower().strip()
+                if field_name == "chat history":
+                    chat_history_text = field.get("value", "")
+                    break
+
+    if chat_history_text:
+        parsed_messages = _parse_chatrace_chat_history(chat_history_text)
+        transformed["chat_history"] = parsed_messages
+    else:
+        transformed["chat_history"] = []
+
+    # Pass through tags
+    transformed["tags"] = body.get("tags", [])
+
+    # Extract user_source from channel or other fields
+    channel = body.get("channel")
+    if channel:
+        transformed["user_source"] = f"channel_{channel}"
+
+    return transformed
+
+
 def validate_payload(client_id: str, body: dict) -> WebhookPayload:
     """Validate required fields, truncate chat_history, and extract optional fields.
 
-    Validates that the incoming payload contains all required fields with correct
-    types and formats. Truncates chat_history to the last 50 messages if it exceeds
-    the limit. Extracts optional fields (tags, last_ref, user_source) when present.
+    Supports both canonical format and Chatrace's 'All Contact Data' format.
+    If a Chatrace payload is detected, it is automatically transformed before
+    validation.
 
     Args:
         client_id: The client identifier from the URL path.
@@ -86,6 +212,9 @@ def validate_payload(client_id: str, body: dict) -> WebhookPayload:
         ValidationError: If required fields are missing, chat_history is empty,
                         or timestamp format is invalid.
     """
+    # Transform Chatrace payload if detected
+    body = _transform_chatrace_payload(body)
+
     errors: list[str] = []
 
     # Check for required fields
