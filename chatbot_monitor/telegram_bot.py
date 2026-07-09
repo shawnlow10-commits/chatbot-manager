@@ -114,97 +114,118 @@ async def _handle_check(text: str, request: Request) -> str:
 
     contact_id = parts[1].strip()
     store = request.app.state.store
-    config = request.app.state.config
 
-    # Try to find recent conversations for this contact in our DB
-    since = datetime.now(timezone.utc) - timedelta(days=7)
-
-    # Query structured outputs for this contact
-    assert store._db is not None
-    cursor = await store._db.execute(
-        """SELECT outcome, drop_off_stage, sentiment, bot_error_detected,
-                  bot_error_notes, notable_quote, summary, timestamp
-           FROM structured_outputs
-           WHERE contact_id = ?
-           ORDER BY timestamp DESC
-           LIMIT 5""",
-        (contact_id,),
+    # Use get_conversations_since with a wide window to find this contact's data
+    from datetime import timedelta
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    all_convos = await store.get_conversations_since(
+        request.app.state.config.clients.get("gjbc", list(request.app.state.config.clients.keys())[0]) if request.app.state.config.clients else "gjbc",
+        since,
     )
-    rows = await cursor.fetchall()
 
-    if not rows:
-        # Try Chatrace API if available
-        chatrace_client = getattr(request.app.state, "chatrace_client", None)
-        if chatrace_client:
-            return f"No analyzed conversations found for {contact_id} in our database. Try sending their full phone number including country code."
-        return f"No conversations found for {contact_id} in the last 7 days."
+    # Try Supabase direct query if available
+    try:
+        from chatbot_monitor.supabase_store import SupabaseStore
+        if isinstance(store, SupabaseStore):
+            url = f"{store._url}/rest/v1/structured_outputs?contact_id=eq.{contact_id}&select=outcome,drop_off_stage,sentiment,bot_error_detected,bot_error_notes,notable_quote,summary,timestamp&order=timestamp.desc&limit=5"
+            resp = await store._http.get(url, headers=store._headers)
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows:
+                    reply = f"📱 Contact: {contact_id}\n\n"
+                    for i, row in enumerate(rows, 1):
+                        reply += f"--- Conversation {i} ({row.get('timestamp', 'N/A')}) ---\n"
+                        reply += f"Outcome: {row.get('outcome')}\n"
+                        if row.get('drop_off_stage'):
+                            reply += f"Drop-off stage: {row['drop_off_stage']}\n"
+                        reply += f"Sentiment: {row.get('sentiment')}\n"
+                        if row.get('bot_error_detected'):
+                            reply += f"Bot error: {row.get('bot_error_notes') or 'Yes'}\n"
+                        if row.get('notable_quote'):
+                            reply += f"Quote: \"{row['notable_quote']}\"\n"
+                        if row.get('summary'):
+                            reply += f"Summary: {row['summary']}\n"
+                        reply += "\n"
+                    return reply[:4000]
+                else:
+                    return f"No conversations found for {contact_id}."
+    except Exception:
+        pass
 
-    # Format the results
-    reply = f"📱 Contact: {contact_id}\n\n"
-    for i, row in enumerate(rows, 1):
-        outcome, stage, sentiment, errors, error_notes, quote, summary, ts = row
-        reply += f"--- Conversation {i} ({ts}) ---\n"
-        reply += f"Outcome: {outcome}\n"
-        if stage:
-            reply += f"Drop-off stage: {stage}\n"
-        reply += f"Sentiment: {sentiment}\n"
-        if errors:
-            reply += f"Bot error: {error_notes or 'Yes'}\n"
-        if quote:
-            reply += f"Quote: \"{quote}\"\n"
-        if summary:
-            reply += f"Summary: {summary}\n"
-        reply += "\n"
+    # Fallback: try raw SQL for SQLite
+    try:
+        assert store._db is not None
+        cursor = await store._db.execute(
+            """SELECT outcome, drop_off_stage, sentiment, bot_error_detected,
+                      bot_error_notes, notable_quote, summary, timestamp
+               FROM structured_outputs
+               WHERE contact_id = ?
+               ORDER BY timestamp DESC
+               LIMIT 5""",
+            (contact_id,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return f"No conversations found for {contact_id}."
 
-    return reply[:4000]  # Keep under Telegram limit
+        reply = f"📱 Contact: {contact_id}\n\n"
+        for i, row in enumerate(rows, 1):
+            outcome, stage, sentiment, errors, error_notes, quote, summary, ts = row
+            reply += f"--- Conversation {i} ({ts}) ---\n"
+            reply += f"Outcome: {outcome}\n"
+            if stage:
+                reply += f"Drop-off stage: {stage}\n"
+            reply += f"Sentiment: {sentiment}\n"
+            if errors:
+                reply += f"Bot error: {error_notes or 'Yes'}\n"
+            if quote:
+                reply += f"Quote: \"{quote}\"\n"
+            if summary:
+                reply += f"Summary: {summary}\n"
+            reply += "\n"
+        return reply[:4000]
+    except Exception as e:
+        return f"Error looking up contact: {str(e)[:200]}"
 
 
 async def _handle_today(store, config) -> str:
     """Handle /today — summary of today's conversations."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    assert store._db is not None
-    cursor = await store._db.execute(
-        """SELECT outcome, COUNT(*) as count
-           FROM structured_outputs
-           WHERE timestamp >= ?
-           GROUP BY outcome""",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    rows = await cursor.fetchall()
+    # Use the store's get_conversations_since method (works with both SQLite and Supabase)
+    # Get conversations for all clients
+    all_convos = []
+    for client_id in config.clients:
+        convos = await store.get_conversations_since(client_id, today_start)
+        all_convos.extend(convos)
 
-    if not rows:
+    if not all_convos:
         return "📊 No conversations analyzed today yet."
 
-    total = sum(row[1] for row in rows)
+    total = len(all_convos)
+    outcomes = {}
+    sentiments = {}
+    errors = 0
+
+    for c in all_convos:
+        o = c.outcome.value if hasattr(c.outcome, "value") else str(c.outcome)
+        s = c.sentiment.value if hasattr(c.sentiment, "value") else str(c.sentiment)
+        outcomes[o] = outcomes.get(o, 0) + 1
+        sentiments[s] = sentiments.get(s, 0) + 1
+        if c.bot_error_detected:
+            errors += 1
+
     reply = f"📊 Today's Summary ({total} conversations)\n\n"
-    for outcome, count in sorted(rows, key=lambda x: -x[1]):
+    for outcome, count in sorted(outcomes.items(), key=lambda x: -x[1]):
         pct = count / total * 100
         reply += f"• {outcome}: {count} ({pct:.0f}%)\n"
 
-    # Get sentiment breakdown
-    cursor = await store._db.execute(
-        """SELECT sentiment, COUNT(*) as count
-           FROM structured_outputs
-           WHERE timestamp >= ?
-           GROUP BY sentiment""",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    sentiment_rows = await cursor.fetchall()
-    if sentiment_rows:
-        reply += "\nSentiment:\n"
-        for sentiment, count in sorted(sentiment_rows, key=lambda x: -x[1]):
-            reply += f"• {sentiment}: {count}\n"
+    reply += "\nSentiment:\n"
+    for sentiment, count in sorted(sentiments.items(), key=lambda x: -x[1]):
+        reply += f"• {sentiment}: {count}\n"
 
-    # Bot errors today
-    cursor = await store._db.execute(
-        """SELECT COUNT(*) FROM structured_outputs
-           WHERE timestamp >= ? AND bot_error_detected = 1""",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    error_row = await cursor.fetchone()
-    if error_row and error_row[0] > 0:
-        reply += f"\n⚠️ Bot errors: {error_row[0]}"
+    if errors > 0:
+        reply += f"\n⚠️ Bot errors: {errors}"
 
     return reply
 
@@ -213,67 +234,65 @@ async def _handle_dropoffs(store, config) -> str:
     """Handle /dropoffs — list contacts that dropped off today."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    assert store._db is not None
-    cursor = await store._db.execute(
-        """SELECT contact_id, drop_off_stage, summary, timestamp
-           FROM structured_outputs
-           WHERE timestamp >= ? AND outcome = 'dropped_off'
-           ORDER BY timestamp DESC
-           LIMIT 10""",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    rows = await cursor.fetchall()
+    # Try Supabase direct query
+    try:
+        from chatbot_monitor.supabase_store import SupabaseStore
+        if isinstance(store, SupabaseStore):
+            ts = today_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+            url = f"{store._url}/rest/v1/structured_outputs?timestamp=gte.{ts}&outcome=eq.dropped_off&select=contact_id,drop_off_stage,summary,timestamp&order=timestamp.desc&limit=10"
+            resp = await store._http.get(url, headers=store._headers)
+            if resp.status_code == 200:
+                rows = resp.json()
+                if not rows:
+                    return "✅ No drop-offs today!"
+                reply = f"📉 Drop-offs today ({len(rows)}):\n\n"
+                for row in rows:
+                    reply += f"• {row.get('contact_id', 'Unknown')}"
+                    if row.get('drop_off_stage'):
+                        reply += f" — dropped at {row['drop_off_stage']}"
+                    if row.get('summary'):
+                        reply += f"\n  {row['summary']}"
+                    reply += "\n\n"
+                return reply[:4000]
+    except Exception:
+        pass
 
-    if not rows:
+    # Fallback: get all conversations and filter
+    all_dropoffs = []
+    for client_id in config.clients:
+        convos = await store.get_conversations_since(client_id, today_start)
+        for c in convos:
+            outcome = c.outcome.value if hasattr(c.outcome, "value") else str(c.outcome)
+            if outcome == "dropped_off":
+                all_dropoffs.append(c)
+
+    if not all_dropoffs:
         return "✅ No drop-offs today!"
 
-    reply = f"📉 Drop-offs today ({len(rows)}):\n\n"
-    for contact_id, stage, summary, ts in rows:
-        reply += f"• {contact_id}"
+    reply = f"📉 Drop-offs today ({len(all_dropoffs)}):\n\n"
+    for c in all_dropoffs[:10]:
+        stage = c.drop_off_stage.value if c.drop_off_stage else None
+        reply += f"• Dropped"
         if stage:
-            reply += f" — dropped at {stage}"
-        if summary:
-            reply += f"\n  {summary}"
+            reply += f" at {stage}"
+        if c.summary:
+            reply += f"\n  {c.summary}"
         reply += "\n\n"
-
     return reply[:4000]
 
 
 async def _handle_status(store, config) -> str:
     """Handle /status — quick system status."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    assert store._db is not None
-
-    # Conversations today
-    cursor = await store._db.execute(
-        "SELECT COUNT(*) FROM structured_outputs WHERE timestamp >= ?",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    row = await cursor.fetchone()
-    convos_today = row[0] if row else 0
-
-    # Conversations this week
     week_start = datetime.now(timezone.utc) - timedelta(days=7)
-    cursor = await store._db.execute(
-        "SELECT COUNT(*) FROM structured_outputs WHERE timestamp >= ?",
-        (week_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    row = await cursor.fetchone()
-    convos_week = row[0] if row else 0
 
-    # Total stored
-    cursor = await store._db.execute("SELECT COUNT(*) FROM structured_outputs")
-    row = await cursor.fetchone()
-    total = row[0] if row else 0
-
-    # Flags today
-    cursor = await store._db.execute(
-        "SELECT COUNT(*) FROM flag_history WHERE triggered_at >= ?",
-        (today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-    )
-    row = await cursor.fetchone()
-    flags_today = row[0] if row else 0
+    convos_today = 0
+    convos_week = 0
+    for client_id in config.clients:
+        today_convos = await store.get_conversations_since(client_id, today_start)
+        week_convos = await store.get_conversations_since(client_id, week_start)
+        convos_today += len(today_convos)
+        convos_week += len(week_convos)
 
     now = datetime.now(timezone.utc)
     reply = (
@@ -281,8 +300,7 @@ async def _handle_status(store, config) -> str:
         f"Time: {now.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Conversations today: {convos_today}\n"
         f"Conversations this week: {convos_week}\n"
-        f"Total stored: {total}\n"
-        f"Alerts triggered today: {flags_today}\n"
+        f"Storage: {'Supabase (persistent)' if hasattr(store, '_url') else 'SQLite (ephemeral)'}\n"
         f"Service: running ✅"
     )
     return reply

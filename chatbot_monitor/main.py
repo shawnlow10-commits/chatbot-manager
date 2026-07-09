@@ -59,12 +59,23 @@ async def lifespan(app: FastAPI):
 
     # Initialize memory store (ensure directory exists)
     import os
-    db_dir = os.path.dirname(config.db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    store = MemoryStore(config.db_path)
-    await store.initialize()
-    logger.info("Memory store initialized", extra={"db_path": config.db_path})
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_KEY", "")
+
+    if supabase_url and supabase_key:
+        # Use persistent Supabase storage
+        from chatbot_monitor.supabase_store import SupabaseStore
+        store = SupabaseStore(supabase_url, supabase_key)
+        await store.initialize()
+        logger.info("Using Supabase persistent storage")
+    else:
+        # Fallback to SQLite (ephemeral on Render)
+        db_dir = os.path.dirname(config.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        store = MemoryStore(config.db_path)
+        await store.initialize()
+        logger.info("Using SQLite storage (ephemeral)", extra={"db_path": config.db_path})
 
     # Create shared HTTP client
     http_client = httpx.AsyncClient()
