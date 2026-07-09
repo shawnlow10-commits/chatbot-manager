@@ -34,9 +34,10 @@ class ChatraceClient:
         self._token = api_token
         self._http = http_client
         self._headers = {
-            "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json",
         }
+        # Chatrace uses api_token as a query parameter for auth
+        self._auth_params = {"api_token": api_token}
 
     async def bulk_sync_contacts(self, store, analyzer, client_id: str) -> int:
         """Pull contacts from Chatrace and re-analyze their chat histories.
@@ -70,7 +71,7 @@ class ChatraceClient:
 
             # Query contacts with that field populated
             url = f"{CHATRACE_BASE_URL}/contacts/find_by_custom_field"
-            params = {"custom_field_id": chat_history_field_id}
+            params = {"custom_field_id": chat_history_field_id, **self._auth_params}
             response = await self._http.get(url, headers=self._headers, params=params, timeout=30)
 
             if response.status_code != 200:
@@ -200,7 +201,7 @@ class ChatraceClient:
         """Fetch a single contact with all their custom fields."""
         try:
             url = f"{CHATRACE_BASE_URL}/contacts/{contact_id}"
-            response = await self._http.get(url, headers=self._headers, timeout=15)
+            response = await self._http.get(url, headers=self._headers, params=self._auth_params, timeout=15)
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
@@ -275,7 +276,7 @@ class ChatraceClient:
         # Apply tag to contact
         try:
             url = f"{CHATRACE_BASE_URL}/contacts/{contact_id}/tags/{tag_id}"
-            response = await self._http.post(url, headers=self._headers)
+            response = await self._http.post(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
 
             if response.status_code in (200, 201):
                 logger.info(
@@ -335,7 +336,7 @@ class ChatraceClient:
             url = f"{CHATRACE_BASE_URL}/contacts/{contact_id}/custom_fields/{field_id}"
             response = await self._http.post(
                 url,
-                headers=self._headers,
+                headers=self._headers, params=self._auth_params,
                 json={"value": analysis_text[:500]},  # Chatrace may have length limits
             )
 
@@ -366,7 +367,7 @@ class ChatraceClient:
         """
         try:
             url = f"{CHATRACE_BASE_URL}/accounts/tags/name/{tag_name}"
-            response = await self._http.get(url, headers=self._headers)
+            response = await self._http.get(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
             if response.status_code == 200:
                 data = response.json()
                 return str(data.get("id", "")) if data else None
@@ -385,7 +386,7 @@ class ChatraceClient:
         """
         try:
             url = f"{CHATRACE_BASE_URL}/accounts/custom_fields/name/{field_name}"
-            response = await self._http.get(url, headers=self._headers)
+            response = await self._http.get(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
             if response.status_code == 200:
                 data = response.json()
                 return str(data.get("id", "")) if data else None
