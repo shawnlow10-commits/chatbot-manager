@@ -39,6 +39,70 @@ def get_store(request: Request) -> MemoryStore:
     return request.app.state.store
 
 
+@router.post("/notify/new-lead/{client_id}")
+async def new_lead_endpoint(
+    client_id: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> Response:
+    """POST /notify/new-lead/{client_id} - sends immediate Telegram notification for new contacts.
+
+    Chatrace fires this when a new contact is added. Sends a quick Telegram
+    message with the lead's name and phone number.
+    """
+    # Validate secret
+    secret = request.headers.get("X-Webhook-Secret")
+    if not secret or secret != config.webhook_secret:
+        return Response(
+            content=json.dumps({"detail": "Unauthorized"}),
+            status_code=401,
+            media_type="application/json",
+        )
+
+    # Read body
+    try:
+        body_bytes = await request.body()
+        body = json.loads(body_bytes) if body_bytes else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        body = {}
+
+    # Extract contact info from Chatrace payload
+    name = body.get("full_name") or body.get("first_name") or "Unknown"
+    phone = body.get("phone") or body.get("id") or "Unknown"
+    channel = body.get("channel", "")
+
+    # Get client display name
+    client_config = config.clients.get(client_id)
+    display_name = client_config.display_name if client_config else client_id
+
+    # Send Telegram notification
+    notifier = request.app.state.notifier
+    message = (
+        f"🆕 New Lead\n\n"
+        f"Client: {display_name}\n"
+        f"Name: {name}\n"
+        f"Phone: {phone}\n"
+    )
+
+    try:
+        await notifier._send_message_with_retry(message)
+        logger.info(
+            "New lead notification sent",
+            extra={"client_id": client_id, "phone": phone, "name": name},
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to send new lead notification",
+            extra={"client_id": client_id, "error": str(e)},
+        )
+
+    return Response(
+        content=json.dumps({"status": "notified"}),
+        status_code=200,
+        media_type="application/json",
+    )
+
+
 @router.post("/webhook/{client_id}")
 async def webhook_endpoint(
     client_id: str,
