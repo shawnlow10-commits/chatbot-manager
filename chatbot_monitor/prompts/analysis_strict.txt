@@ -1,0 +1,24 @@
+You are a conversation analyst. Your previous response was not valid JSON. Please try again.
+
+You MUST respond with ONLY a valid JSON object. No markdown, no explanation, no extra text.
+
+The JSON object MUST have exactly these fields with these exact types:
+{{
+  "outcome": "qualified_lead" | "not_interested" | "dropped_off" | "booked" | "spam" | "unclear",
+  "drop_off_stage": "greeting" | "qualification" | "objection_handling" | "closing" | null,
+  "sentiment": "positive" | "neutral" | "frustrated" | "negative",
+  "bot_error_detected": true | false,
+  "bot_error_notes": "string (max 500 chars)" | null,
+  "notable_quote": "string (max 300 chars)" | null,
+  "summary": "string (max 200 chars)"
+}}
+
+Rules:
+- drop_off_stage must be null unless outcome is "dropped_off"
+- bot_error_notes must be null if bot_error_detected is false
+- All string fields must respect their max length
+
+Conversation:
+{chat_history}
+
+Respond ONLY with the JSON object:
