@@ -388,6 +388,21 @@ async def _process_conversation(
             )
             return
 
+        # Step 3b: Sync analysis back to Chatrace (best-effort, never blocks)
+        chatrace_client = getattr(request.app.state, "chatrace_client", None)
+        if chatrace_client:
+            try:
+                await chatrace_client.sync_analysis_to_contact(
+                    contact_id=contact_id,
+                    analysis=result,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Chatrace sync failed (non-blocking)",
+                    extra={"contact_id": contact_id, "error": str(e)},
+                )
+
         # Step 4: Evaluate anomalies
         try:
             alerts = await detector.evaluate(client_id, result)

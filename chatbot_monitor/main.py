@@ -82,6 +82,14 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("DigestScheduler started")
 
+    # Initialize Chatrace API client (optional — only if token is configured)
+    chatrace_client = None
+    chatrace_token = os.environ.get("CHATRACE_API_TOKEN", "")
+    if chatrace_token:
+        from chatbot_monitor.chatrace_api import ChatraceClient
+        chatrace_client = ChatraceClient(chatrace_token, http_client)
+        logger.info("Chatrace API client initialized")
+
     # Inject into app state for dependency injection
     app.state.config = config
     app.state.store = store
@@ -90,6 +98,7 @@ async def lifespan(app: FastAPI):
     app.state.notifier = notifier
     app.state.scheduler = scheduler
     app.state.http_client = http_client
+    app.state.chatrace_client = chatrace_client
 
     yield
 
