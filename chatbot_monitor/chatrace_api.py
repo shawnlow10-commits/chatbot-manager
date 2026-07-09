@@ -276,7 +276,7 @@ class ChatraceClient:
         # Apply tag to contact
         try:
             url = f"{CHATRACE_BASE_URL}/contacts/{contact_id}/tags/{tag_id}"
-            response = await self._http.post(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
+            response = await self._http.post(url, headers=self._headers, params=self._auth_params)
 
             if response.status_code in (200, 201):
                 logger.info(
@@ -367,7 +367,7 @@ class ChatraceClient:
         """
         try:
             url = f"{CHATRACE_BASE_URL}/accounts/tags/name/{tag_name}"
-            response = await self._http.get(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
+            response = await self._http.get(url, headers=self._headers, params=self._auth_params)
             if response.status_code == 200:
                 data = response.json()
                 return str(data.get("id", "")) if data else None
@@ -386,7 +386,7 @@ class ChatraceClient:
         """
         try:
             url = f"{CHATRACE_BASE_URL}/accounts/custom_fields/name/{field_name}"
-            response = await self._http.get(url, headers=self._headers, params=self._auth_params, params=self._auth_params)
+            response = await self._http.get(url, headers=self._headers, params=self._auth_params)
             if response.status_code == 200:
                 data = response.json()
                 return str(data.get("id", "")) if data else None
