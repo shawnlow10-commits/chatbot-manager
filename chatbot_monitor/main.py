@@ -22,6 +22,7 @@ from chatbot_monitor.logging_config import get_logger, setup_logging
 from chatbot_monitor.memory_store import MemoryStore
 from chatbot_monitor.nim_analyzer import NIMAnalyzer
 from chatbot_monitor.receiver import router as receiver_router
+from chatbot_monitor.telegram_bot import bot_router
 from chatbot_monitor.telegram_notifier import TelegramNotifier
 
 logger = get_logger("main")
@@ -134,5 +135,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Include the webhook receiver router
+# Include routers
 app.include_router(receiver_router)
+app.include_router(bot_router)
