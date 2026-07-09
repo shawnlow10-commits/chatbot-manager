@@ -38,9 +38,6 @@ class ChatraceClient:
             "Content-Type": "application/json",
         }
 
-            "Content-Type": "application/json",
-        }
-
     async def bulk_sync_contacts(self, store, analyzer, client_id: str) -> int:
         """Pull contacts from Chatrace and re-analyze their chat histories.
 
