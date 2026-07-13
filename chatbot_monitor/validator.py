@@ -280,12 +280,24 @@ def validate_payload(client_id: str, body: dict) -> WebhookPayload:
     # Convert message dicts to ChatMessage objects
     chat_messages = [ChatMessage(**msg) for msg in truncated_history]
 
+    # Normalize tags — Chatrace sends them as dicts like {'id': '771401'}
+    raw_tags = body.get("tags")
+    normalized_tags = None
+    if raw_tags and isinstance(raw_tags, list):
+        normalized_tags = []
+        for tag in raw_tags:
+            if isinstance(tag, str):
+                normalized_tags.append(tag)
+            elif isinstance(tag, dict):
+                # Extract tag name or id
+                normalized_tags.append(tag.get("name", tag.get("id", str(tag))))
+
     # Build the validated payload with optional fields
     payload = WebhookPayload(
         contact_id=body["contact_id"],
         timestamp=body["timestamp"],
         chat_history=chat_messages,
-        tags=body.get("tags"),
+        tags=normalized_tags,
         last_ref=body.get("last_ref"),
         user_source=body.get("user_source"),
     )
