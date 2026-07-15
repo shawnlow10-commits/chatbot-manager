@@ -75,6 +75,8 @@ async def telegram_webhook(request: Request) -> Response:
             reply = await _handle_status(store, config)
         elif text.startswith("/tag"):
             reply = await _handle_tag(text, request)
+        elif text.startswith("/retag"):
+            reply = await _handle_retag(request)
         elif text.startswith("/sync"):
             reply = await _handle_sync(request)
         elif text.startswith("/help"):
@@ -427,3 +429,64 @@ async def _handle_sync(request: Request) -> str:
         return f"✅ Synced {total_synced} contacts from Chatrace"
     else:
         return "ℹ️ No new contacts to sync (all already in DB or no chat history found)"
+
+
+async def _handle_retag(request: Request) -> str:
+    """Handle /retag — re-apply tags to all contacts in the database based on their analysis."""
+    chatrace_client = getattr(request.app.state, "chatrace_client", None)
+    if not chatrace_client:
+        return "❌ Chatrace API not configured. Add CHATRACE_API_TOKEN to environment."
+
+    store = request.app.state.store
+    config = request.app.state.config
+
+    # Get all analyzed conversations from Supabase
+    try:
+        from chatbot_monitor.supabase_store import SupabaseStore
+        from chatbot_monitor.models import StructuredOutput
+
+        if isinstance(store, SupabaseStore):
+            url = f"{store._url}/rest/v1/structured_outputs?select=contact_id,outcome,drop_off_stage,sentiment,bot_error_detected,bot_error_notes,notable_quote,summary&order=timestamp.desc"
+            resp = await store._http.get(url, headers=store._headers)
+            if resp.status_code != 200:
+                return f"❌ Failed to fetch conversations from Supabase (status {resp.status_code})"
+
+            rows = resp.json()
+            if not rows:
+                return "ℹ️ No analyzed conversations in the database to retag."
+
+            tagged = 0
+            failed = 0
+            for row in rows:
+                contact_id = row.get("contact_id", "")
+                if not contact_id:
+                    continue
+
+                # Strip the + from phone to get Chatrace numeric ID
+                chatrace_id = contact_id.lstrip("+") if contact_id.startswith("+") else contact_id
+
+                try:
+                    analysis = StructuredOutput(
+                        outcome=row["outcome"],
+                        drop_off_stage=row.get("drop_off_stage"),
+                        sentiment=row["sentiment"],
+                        bot_error_detected=bool(row.get("bot_error_detected")),
+                        bot_error_notes=row.get("bot_error_notes"),
+                        notable_quote=row.get("notable_quote"),
+                        summary=row.get("summary", ""),
+                    )
+                    await chatrace_client.sync_analysis_to_contact(
+                        contact_id=chatrace_id,
+                        analysis=analysis,
+                        client_id="gjbc",
+                    )
+                    tagged += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"Failed to retag {contact_id}: {e}")
+
+            return f"✅ Retagged {tagged} contacts ({failed} failed)"
+        else:
+            return "❌ Retag only works with Supabase storage."
+    except Exception as e:
+        return f"❌ Error: {str(e)[:200]}"

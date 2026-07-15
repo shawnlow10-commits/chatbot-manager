@@ -22,10 +22,18 @@ Analyze the conversation below and extract structured insights. Pay special atte
 - Whether the user is a genuine lead or a salesperson/vendor/recruiter trying to pitch
 - Whether the user said something that requires human attention (complaints, unusual requests, high urgency)
 
+## CRITICAL CLASSIFICATION RULES
+
+- If the user is pitching, selling, offering partnerships, promoting their business, or is clearly NOT seeking physiotherapy/fitness services → outcome MUST be "spam". No exceptions.
+- Examples of spam: lead generation offers, marketing services, equipment sales, recruitment, partnership proposals, "I can help your business" messages.
+- A genuine lead is ONLY someone seeking physiotherapy, personal training, or fitness services for themselves.
+- If the user never engages with the bot's questions at all (just sends random/test messages) → outcome is "unclear"
+- If the user starts engaging but stops before completion → outcome is "dropped_off"
+
 ## FLAGS (check for these)
 
 Flag the contact if ANY of these apply:
-- User appears to be a salesperson, vendor, recruiter, or someone pitching a service
+- User appears to be a salesperson, vendor, recruiter, or someone pitching a service (outcome MUST be "spam")
 - User mentions a serious/emergency injury (pain 9-10, accident, can't move)
 - User is angry, threatening, or making a complaint about previous service
 - User is asking for something outside the bot's scope that needs a human
