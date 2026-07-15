@@ -244,32 +244,36 @@ class ChatraceClient:
 
         Mapping:
         - qualified_lead → "qualified"
-        - booked → "booked"
-        - dropped_off → "dropped-off"
-        - not_interested → "not-interested"
+        - booked → "qualified"
+        - dropped_off → "dropped_off"
+        - not_interested → "not_interested"
         - spam → "spam"
-        - unclear → "needs-review"
+        - unclear → "needs_review"
         """
         tag_map = {
             "qualified_lead": "qualified",
-            "booked": "booked",
-            "dropped_off": "dropped-off",
-            "not_interested": "not-interested",
+            "booked": "qualified",
+            "dropped_off": "dropped_off",
+            "not_interested": "not_interested",
             "spam": "spam",
-            "unclear": "needs-review",
+            "unclear": "needs_review",
         }
 
         outcome = analysis.outcome.value
         tag_name = tag_map.get(outcome)
         if not tag_name:
+            logger.debug(
+                "No tag mapping for outcome, skipping",
+                extra={"outcome": outcome, "contact_id": contact_id},
+            )
             return
 
         # First, get or find the tag ID by name
         tag_id = await self._get_tag_id_by_name(tag_name)
         if not tag_id:
-            logger.debug(
-                "Tag not found in Chatrace, skipping",
-                extra={"tag_name": tag_name, "contact_id": contact_id},
+            logger.warning(
+                "Tag not found in Chatrace, skipping tagging",
+                extra={"tag_name": tag_name, "contact_id": contact_id, "outcome": outcome},
             )
             return
 
@@ -284,6 +288,7 @@ class ChatraceClient:
                     extra={
                         "contact_id": contact_id,
                         "tag_name": tag_name,
+                        "tag_id": tag_id,
                         "client_id": client_id,
                     },
                 )
@@ -293,13 +298,15 @@ class ChatraceClient:
                     extra={
                         "contact_id": contact_id,
                         "tag_name": tag_name,
+                        "tag_id": tag_id,
                         "status_code": response.status_code,
+                        "response_body": response.text[:200],
                     },
                 )
         except Exception as e:
             logger.warning(
                 "Chatrace tag API call failed",
-                extra={"contact_id": contact_id, "error": str(e)},
+                extra={"contact_id": contact_id, "tag_name": tag_name, "error": str(e)},
             )
 
     async def _write_analysis_custom_field(
@@ -370,7 +377,18 @@ class ChatraceClient:
             response = await self._http.get(url, headers=self._headers, params=self._auth_params)
             if response.status_code == 200:
                 data = response.json()
-                return str(data.get("id", "")) if data else None
+                tag_id = data.get("id") if data else None
+                if tag_id:
+                    logger.debug(
+                        "Found tag in Chatrace",
+                        extra={"tag_name": tag_name, "tag_id": tag_id},
+                    )
+                    return str(tag_id)
+            else:
+                logger.warning(
+                    "Tag lookup returned non-200",
+                    extra={"tag_name": tag_name, "status_code": response.status_code, "body": response.text[:200]},
+                )
         except Exception as e:
             logger.debug(
                 "Failed to look up tag",

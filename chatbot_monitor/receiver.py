@@ -260,6 +260,7 @@ async def webhook_endpoint(
         _process_conversation,
         client_id=client_id,
         contact_id=contact_id,
+        chatrace_id=validated_payload.chatrace_id,
         dedupe_key=dedupe_key,
         timestamp=validated_payload.timestamp,
         chat_history=[msg.model_dump() for msg in validated_payload.chat_history],
@@ -276,6 +277,7 @@ async def webhook_endpoint(
 async def _process_conversation(
     client_id: str,
     contact_id: str,
+    chatrace_id: str | None,
     dedupe_key: str,
     timestamp: str,
     chat_history: list[dict],
@@ -391,16 +393,18 @@ async def _process_conversation(
         # Step 3b: Sync analysis back to Chatrace (best-effort, never blocks)
         chatrace_client = getattr(request.app.state, "chatrace_client", None)
         if chatrace_client:
+            # Use the Chatrace numeric ID for API calls, fall back to contact_id
+            api_contact_id = chatrace_id or contact_id
             try:
                 await chatrace_client.sync_analysis_to_contact(
-                    contact_id=contact_id,
+                    contact_id=api_contact_id,
                     analysis=result,
                     client_id=client_id,
                 )
             except Exception as e:
                 logger.warning(
                     "Chatrace sync failed (non-blocking)",
-                    extra={"contact_id": contact_id, "error": str(e)},
+                    extra={"contact_id": api_contact_id, "error": str(e)},
                 )
 
         # Step 4: Evaluate anomalies

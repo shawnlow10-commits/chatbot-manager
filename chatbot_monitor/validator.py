@@ -145,6 +145,10 @@ def _transform_chatrace_payload(body: dict) -> dict:
     # Extract contact_id from phone or id
     transformed["contact_id"] = body.get("phone") or body.get("id") or ""
 
+    # Store the Chatrace numeric ID separately for API callbacks
+    # The Chatrace API requires the numeric ID for endpoints like tagging
+    transformed["chatrace_id"] = body.get("id") or ""
+
     # Extract timestamp from last_interaction (unix ms) or created_at
     last_interaction = body.get("last_interaction")
     if last_interaction:
@@ -300,6 +304,7 @@ def validate_payload(client_id: str, body: dict) -> WebhookPayload:
         tags=normalized_tags,
         last_ref=body.get("last_ref"),
         user_source=body.get("user_source"),
+        chatrace_id=body.get("chatrace_id"),
     )
 
     logger.debug(

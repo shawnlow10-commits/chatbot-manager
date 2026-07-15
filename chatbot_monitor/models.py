@@ -53,6 +53,7 @@ class WebhookPayload(BaseModel):
     tags: Optional[list[str]] = None
     last_ref: Optional[str] = None
     user_source: Optional[str] = None
+    chatrace_id: Optional[str] = None  # Chatrace numeric contact ID for API callbacks
 
 
 class StructuredOutput(BaseModel):
